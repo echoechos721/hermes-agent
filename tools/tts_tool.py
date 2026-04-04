@@ -73,6 +73,9 @@ def _import_sounddevice():
 # ===========================================================================
 DEFAULT_PROVIDER = "edge"
 DEFAULT_EDGE_VOICE = "en-US-AriaNeural"
+DEFAULT_EDGE_RATE = "+0%"
+DEFAULT_EDGE_VOLUME = "+0%"
+DEFAULT_EDGE_PITCH = "+0Hz"
 DEFAULT_ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"  # Adam
 DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
 DEFAULT_ELEVENLABS_STREAMING_MODEL_ID = "eleven_flash_v2_5"
@@ -179,8 +182,17 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
     _edge_tts = _import_edge_tts()
     edge_config = tts_config.get("edge", {})
     voice = edge_config.get("voice", DEFAULT_EDGE_VOICE)
+    rate = edge_config.get("rate", DEFAULT_EDGE_RATE)
+    volume = edge_config.get("volume", DEFAULT_EDGE_VOLUME)
+    pitch = edge_config.get("pitch", DEFAULT_EDGE_PITCH)
 
-    communicate = _edge_tts.Communicate(text, voice)
+    communicate = _edge_tts.Communicate(
+        text,
+        voice,
+        rate=rate,
+        volume=volume,
+        pitch=pitch,
+    )
     await communicate.save(output_path)
     return output_path
 

@@ -761,7 +761,79 @@ class GatewayRunner:
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
         )
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    @staticmethod
+    def _is_gemma_routed_source(source: Optional[SessionSource]) -> bool:
+        if not source:
+            return False
+        for value in (getattr(source, "chat_name", None), getattr(source, "chat_topic", None)):
+            if isinstance(value, str) and "ai-gemma" in value.lower():
+                return True
+        return False
+
+    @staticmethod
+    def _build_gemma_route(user_config: dict) -> Optional[dict]:
+        delegation = (user_config or {}).get("delegation", {}) or {}
+        model = str(delegation.get("model") or "").strip()
+        provider = str(delegation.get("provider") or "").strip().lower()
+        base_url = str(delegation.get("base_url") or "").strip().rstrip("/")
+        api_key = str(delegation.get("api_key") or "").strip() or None
+        if not model:
+            return None
+
+        requested_provider = provider or ("custom" if base_url else None)
+
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            runtime = resolve_runtime_provider(
+                requested=requested_provider,
+                explicit_api_key=api_key,
+                explicit_base_url=base_url or None,
+            )
+        except Exception:
+            if not base_url:
+                return None
+            runtime = {
+                "provider": provider or "custom",
+                "api_mode": "chat_completions",
+                "base_url": base_url,
+                "api_key": api_key,
+                "command": None,
+                "args": [],
+                "credential_pool": None,
+            }
+
+        return {
+            "model": model,
+            "runtime": {
+                "api_key": runtime.get("api_key"),
+                "base_url": runtime.get("base_url"),
+                "provider": runtime.get("provider"),
+                "api_mode": runtime.get("api_mode"),
+                "command": runtime.get("command"),
+                "args": list(runtime.get("args") or []),
+                "credential_pool": runtime.get("credential_pool"),
+            },
+            "label": "forced route → gemma",
+            "signature": (
+                model,
+                runtime.get("provider"),
+                runtime.get("base_url"),
+                runtime.get("api_mode"),
+                runtime.get("command"),
+                tuple(runtime.get("args") or ()),
+            ),
+        }
+
+    def _resolve_turn_agent_config(
+        self,
+        user_message: str,
+        model: str,
+        runtime_kwargs: dict,
+        *,
+        source: Optional[SessionSource] = None,
+        route_override: Optional[dict] = None,
+    ) -> dict:
         from agent.smart_model_routing import resolve_turn_route
 
         primary = {
@@ -774,6 +846,13 @@ class GatewayRunner:
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
         }
+
+        override_name = str((route_override or {}).get("name") or "").strip().lower()
+        if override_name == "gemma" or GatewayRunner._is_gemma_routed_source(source):
+            gemma_route = GatewayRunner._build_gemma_route(_load_gateway_config())
+            if gemma_route:
+                return gemma_route
+
         return resolve_turn_route(user_message, getattr(self, "_smart_model_routing", {}), primary)
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
@@ -2005,6 +2084,15 @@ class GatewayRunner:
         if canonical == "voice":
             return await self._handle_voice_command(event)
 
+        if canonical == "gemma":
+            user_prompt = event.get_command_args().strip()
+            if not user_prompt:
+                return "Usage: /gemma <prompt>"
+            event.text = user_prompt
+            event.route_override = {"name": "gemma"}
+            canonical = None
+            command = None
+
         # User-defined quick commands (bypass agent loop, no LLM call)
         if command:
             if isinstance(self.config, dict):
@@ -2695,7 +2783,8 @@ class GatewayRunner:
                 source=source,
                 session_id=session_entry.session_id,
                 session_key=session_key,
-                event_message_id=event.message_id,
+                event_message_id=getattr(event, "message_id", None),
+                route_override=getattr(event, "route_override", None),
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -3987,7 +4076,12 @@ class GatewayRunner:
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
             reasoning_config = self._load_reasoning_config()
             self._reasoning_config = reasoning_config
-            turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                prompt,
+                model,
+                runtime_kwargs,
+                source=source,
+            )
 
             def run_sync():
                 agent = AIAgent(
@@ -4146,7 +4240,12 @@ class GatewayRunner:
             model = _resolve_gateway_model(user_config)
             platform_key = _platform_config_key(source.platform)
             reasoning_config = self._load_reasoning_config()
-            turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                question,
+                model,
+                runtime_kwargs,
+                source=source,
+            )
             pr = self._provider_routing
 
             # Snapshot history from running agent or stored transcript
@@ -5450,6 +5549,7 @@ class GatewayRunner:
         session_key: str = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
+        route_override: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -5805,7 +5905,13 @@ class GatewayRunner:
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
-            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                message,
+                model,
+                runtime_kwargs,
+                source=source,
+                route_override=route_override,
+            )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool

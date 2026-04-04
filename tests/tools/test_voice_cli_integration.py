@@ -2,6 +2,7 @@
 state management, streaming TTS activation, voice message prefix, _vprint."""
 
 import ast
+import asyncio
 import os
 import queue
 import threading
@@ -527,6 +528,60 @@ class TestEdgeTTSLazyImport:
                 break
         else:
             pytest.fail("_generate_edge_tts not found in tts_tool.py")
+
+
+class TestEdgeTTSSpeechControls:
+    def test_generate_edge_tts_passes_configured_speech_controls(self, monkeypatch, tmp_path):
+        from tools import tts_tool
+
+        captured = {}
+
+        class FakeCommunicate:
+            def __init__(self, text, voice, **kwargs):
+                captured["text"] = text
+                captured["voice"] = voice
+                captured["kwargs"] = kwargs
+
+            async def save(self, output_path):
+                captured["output_path"] = output_path
+                with open(output_path, "wb") as f:
+                    f.write(b"fake-audio")
+
+        monkeypatch.setattr(
+            tts_tool,
+            "_import_edge_tts",
+            lambda: SimpleNamespace(Communicate=FakeCommunicate),
+        )
+
+        output_path = tmp_path / "voice.mp3"
+        tts_config = {
+            "edge": {
+                "voice": "en-GB-RyanNeural",
+                "rate": "+0%",
+                "volume": "+0%",
+                "pitch": "-10%",
+            }
+        }
+
+        result = asyncio.run(
+            tts_tool._generate_edge_tts(
+                "Testing speech controls.",
+                str(output_path),
+                tts_config,
+            )
+        )
+
+        assert result == str(output_path)
+        assert captured == {
+            "text": "Testing speech controls.",
+            "voice": "en-GB-RyanNeural",
+            "kwargs": {
+                "rate": "+0%",
+                "volume": "+0%",
+                "pitch": "-10%",
+            },
+            "output_path": str(output_path),
+        }
 
 
 class TestStreamingTTSOutputStreamCleanup:
